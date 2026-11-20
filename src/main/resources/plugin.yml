@@ -1,0 +1,15 @@
+name: DauTruong
+version: 1.0.0
+main: vn.dautruong.DauTruongPlugin
+api-version: '26.3'
+description: Đấu trường PvP giao hữu - không mất đồ
+commands:
+  dautruong:
+    description: Thách đấu PvP giao hữu
+    usage: /dautruong <người chơi>
+    permission: dautruong.use
+permissions:
+  dautruong.use:
+    default: true
+  dautruong.admin:
+    default: op

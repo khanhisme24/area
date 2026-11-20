@@ -1,0 +1,6 @@
+# Thời gian đếm ngược trước khi trận bắt đầu (giây)
+countdown-seconds: 5
+# Lời thách đấu hết hạn sau bao nhiêu giây
+challenge-expire-seconds: 30
+# Vị trí đấu trường (arena.spawn1 / arena.spawn2 / arena.exit)
+# được lưu tự động bằng lệnh /dautruong setspawn1, setspawn2, setexit
