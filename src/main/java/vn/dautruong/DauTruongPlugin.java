@@ -9,6 +9,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.attribute.Attribute;
+import org.bukkit.block.BlockState;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -39,6 +40,7 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
     private final Map<UUID, Duel> duels = new HashMap<>();
     private final Map<UUID, Challenge> challenges = new HashMap<>(); // key = người được thách
     final Map<UUID, PlayerSnapshot> pendingRestore = new HashMap<>();
+    private final Map<UUID, PlayerSnapshot> spectators = new HashMap<>();
     private boolean internalTeleport;
 
     @Override
@@ -56,9 +58,11 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
     public void onDisable() {
         for (Duel d : new HashSet<>(duels.values())) {
             if (d.task != null) d.task.cancel();
+            clearBlocks(d);
             restore(d, d.a);
             restore(d, d.b);
         }
+        releaseSpectators();
         duels.clear();
     }
 
@@ -93,9 +97,10 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
             send(p, "<yellow>/dautruong <tên người chơi></yellow> <gray>- thách đấu");
             send(p, "<yellow>/dautruong accept [tên]</yellow> <gray>- chấp nhận");
             send(p, "<yellow>/dautruong deny [tên]</yellow> <gray>- từ chối");
-            send(p, "<yellow>/dautruong leave</yellow> <gray>- đầu hàng / rời trận");
+            send(p, "<yellow>/dautruong xem [tên]</yellow> <gray>- vào xem trận đang diễn ra");
+            send(p, "<yellow>/dautruong leave</yellow> <gray>- đầu hàng / thoát chế độ xem");
             if (p.hasPermission("dautruong.admin")) {
-                send(p, "<yellow>/dautruong setspawn1|setspawn2|setexit</yellow> <gray>- cài đặt đấu trường");
+                send(p, "<yellow>/dautruong setspawn1|setspawn2|setexit|setspectate</yellow> <gray>- cài đặt đấu trường");
             }
             return true;
         }
@@ -104,8 +109,9 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
         switch (sub) {
             case "accept", "chapnhan" -> accept(p, args.length > 1 ? args[1] : null);
             case "deny", "tuchoi" -> deny(p, args.length > 1 ? args[1] : null);
-            case "leave", "thoat" -> forfeit(p);
-            case "setspawn1", "setspawn2", "setexit" -> {
+            case "leave", "thoat", "thoatxem" -> forfeit(p);
+            case "spectate", "xem" -> spectate(p, args.length > 1 ? args[1] : null);
+            case "setspawn1", "setspawn2", "setexit", "setspectate" -> {
                 if (!p.hasPermission("dautruong.admin")) {
                     send(p, "<red>Bạn không có quyền.");
                     return true;
@@ -123,10 +129,10 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         List<String> out = new ArrayList<>();
         if (args.length == 1) {
-            out.addAll(List.of("accept", "deny", "leave"));
-            if (sender.hasPermission("dautruong.admin")) out.addAll(List.of("setspawn1", "setspawn2", "setexit"));
+            out.addAll(List.of("accept", "deny", "leave", "xem"));
+            if (sender.hasPermission("dautruong.admin")) out.addAll(List.of("setspawn1", "setspawn2", "setexit", "setspectate"));
             addPlayers(out, sender);
-        } else if (args.length == 2 && (args[0].equalsIgnoreCase("accept") || args[0].equalsIgnoreCase("deny"))) {
+        } else if (args.length == 2 && (args[0].equalsIgnoreCase("accept") || args[0].equalsIgnoreCase("deny") || args[0].equalsIgnoreCase("xem"))) {
             addPlayers(out, sender);
         }
         String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
@@ -158,12 +164,24 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
             send(from, "<red>Bạn không thể tự thách đấu chính mình.");
             return;
         }
+        if (spectators.containsKey(from.getUniqueId())) {
+            send(from, "<red>Bạn đang xem trận. Dùng <yellow>/dautruong leave</yellow> để thoát chế độ xem trước.");
+            return;
+        }
+        if (spectators.containsKey(target.getUniqueId())) {
+            send(from, "<red>Người này đang xem trận.");
+            return;
+        }
         if (!arenaReady()) {
             send(from, "<red>Đấu trường chưa được cài đặt. Hãy báo admin.");
             return;
         }
         if (duels.containsKey(from.getUniqueId()) || duels.containsKey(target.getUniqueId())) {
             send(from, "<red>Một trong hai người đang trong trận đấu.");
+            return;
+        }
+        if (!duels.isEmpty()) {
+            send(from, "<red>Đấu trường đang có trận khác, vui lòng đợi một chút.");
             return;
         }
 
@@ -207,8 +225,16 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
             send(target, "<red>Một trong hai người đang trong trận đấu.");
             return;
         }
+        if (!duels.isEmpty()) {
+            send(target, "<red>Đấu trường đang có trận khác, vui lòng đợi một chút.");
+            return;
+        }
         if (!arenaReady()) {
             send(target, "<red>Đấu trường chưa được cài đặt.");
+            return;
+        }
+        if (spectators.containsKey(from.getUniqueId()) || spectators.containsKey(target.getUniqueId())) {
+            send(target, "<red>Một trong hai người đang xem trận.");
             return;
         }
         startDuel(from, target);
@@ -223,6 +249,12 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
     }
 
     void forfeit(Player p) {
+        PlayerSnapshot watching = spectators.remove(p.getUniqueId());
+        if (watching != null) {
+            applySnapshot(p, watching);
+            send(p, "<gray>Bạn đã thoát chế độ xem.");
+            return;
+        }
         Duel d = duels.get(p.getUniqueId());
         if (d == null || d.state == Duel.State.ENDED) {
             send(p, "<red>Bạn không ở trong trận đấu nào.");
@@ -305,11 +337,21 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
 
         // Trả đồ + đưa về chỗ cũ sau 3 giây (trong lúc đó không ai nhận sát thương)
         Bukkit.getScheduler().runTaskLater(this, () -> {
+            clearBlocks(d);
+            releaseSpectators();
             restore(d, winner);
             restore(d, loser);
             duels.remove(d.a);
             duels.remove(d.b);
         }, 60L);
+    }
+
+    /** Xóa toàn bộ block người chơi đã đặt, trả lại đúng block gốc của đấu trường. */
+    void clearBlocks(Duel d) {
+        for (BlockState original : d.placed.values()) {
+            original.update(true, false);
+        }
+        d.placed.clear();
     }
 
     void restore(Duel d, UUID id) {
@@ -336,6 +378,8 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
     void handleQuit(Player p) {
         UUID id = p.getUniqueId();
         challenges.remove(id);
+        PlayerSnapshot watching = spectators.remove(id);
+        if (watching != null) applySnapshot(p, watching);
         Duel d = duels.get(id);
         if (d == null) return;
         if (d.state != Duel.State.ENDED) {
@@ -355,12 +399,67 @@ public final class DauTruongPlugin extends JavaPlugin implements CommandExecutor
             }
             // Phòng trường hợp server sập giữa trận: kéo người chơi ra khỏi đấu trường
             World arena = arenaWorld();
-            if (arena != null && p.getWorld() == arena && !duels.containsKey(id) && !p.hasPermission("dautruong.admin")) {
+            if (arena != null && p.getWorld() == arena && !duels.containsKey(id)
+                    && !spectators.containsKey(id) && !p.hasPermission("dautruong.admin")) {
+                if (p.getGameMode() == GameMode.SPECTATOR) p.setGameMode(GameMode.SURVIVAL);
                 Location exit = readLoc("arena.exit");
                 if (exit == null) exit = Bukkit.getWorlds().get(0).getSpawnLocation();
                 tp(p, exit);
             }
         }, 5L);
+    }
+
+    // ------------------------------------------------------------------ khán giả
+
+    boolean isSpectating(Player p) {
+        return spectators.containsKey(p.getUniqueId());
+    }
+
+    private void spectate(Player p, String targetName) {
+        UUID id = p.getUniqueId();
+        if (duels.containsKey(id)) {
+            send(p, "<red>Bạn đang trong trận đấu.");
+            return;
+        }
+        if (spectators.containsKey(id)) {
+            send(p, "<red>Bạn đang xem rồi. Dùng <yellow>/dautruong leave</yellow> để thoát.");
+            return;
+        }
+        Duel d = duels.values().stream().filter(x -> x.state != Duel.State.ENDED).findFirst().orElse(null);
+        if (d == null) {
+            send(p, "<red>Hiện không có trận đấu nào để xem.");
+            return;
+        }
+        Player target = null;
+        if (targetName != null) {
+            target = Bukkit.getPlayerExact(targetName);
+            if (target == null || duels.get(target.getUniqueId()) != d) {
+                send(p, "<red>Người này không ở trong trận đang diễn ra.");
+                return;
+            }
+        }
+        Location dest = target != null ? target.getLocation() : readLoc("arena.spectate");
+        if (dest == null) dest = readLoc("arena.spawn1");
+        if (dest == null) {
+            send(p, "<red>Đấu trường chưa được cài đặt.");
+            return;
+        }
+        spectators.put(id, PlayerSnapshot.capture(p));
+        p.closeInventory();
+        p.setGameMode(GameMode.SPECTATOR);
+        tp(p, dest);
+        send(p, "<green>Bạn đang xem trận. Gõ <yellow>/dautruong leave</yellow> để thoát.");
+    }
+
+    private void releaseSpectators() {
+        for (UUID id : new ArrayList<>(spectators.keySet())) {
+            PlayerSnapshot s = spectators.remove(id);
+            Player p = Bukkit.getPlayer(id);
+            if (p != null && s != null) {
+                applySnapshot(p, s);
+                send(p, "<gray>Trận đấu đã kết thúc.");
+            }
+        }
     }
 
     // ------------------------------------------------------------------ tiện ích

@@ -4,17 +4,26 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.Bukkit;
+import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockMultiPlaceEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -125,14 +134,78 @@ final class DuelListener implements Listener {
         }
     }
 
+    // Chỉ được phá block do người chơi tự đặt trong trận. Block gốc của đấu trường được bảo vệ.
     @EventHandler(ignoreCancelled = true)
     public void onBreak(BlockBreakEvent e) {
+        Duel d = duel(e.getPlayer());
+        if (d == null) return;
+        if (d.state != Duel.State.FIGHTING || !d.placed.containsKey(e.getBlock().getBlockKey())) {
+            e.setCancelled(true);
+            return;
+        }
+        e.setDropItems(false);
+        e.setExpToDrop(0);
+    }
+
+    // Được đặt block khi trận đang diễn ra; ghi nhớ block gốc để khôi phục sau trận
+    @EventHandler(ignoreCancelled = true)
+    public void onPlace(BlockPlaceEvent e) {
+        Duel d = duel(e.getPlayer());
+        if (d == null) return;
+        Material type = e.getBlockPlaced().getType();
+        if (d.state != Duel.State.FIGHTING || type.hasGravity() || type == Material.TNT || type == Material.FIRE) {
+            e.setCancelled(true);
+            return;
+        }
+        if (e instanceof BlockMultiPlaceEvent multi) {
+            for (BlockState st : multi.getReplacedBlockStates()) {
+                d.placed.putIfAbsent(st.getBlock().getBlockKey(), st);
+            }
+        } else {
+            BlockState st = e.getBlockReplacedState();
+            d.placed.putIfAbsent(st.getBlock().getBlockKey(), st);
+        }
+    }
+
+    // Không dùng xô nước/dung nham (chảy lan khó khôi phục)
+    @EventHandler(ignoreCancelled = true)
+    public void onBucketEmpty(PlayerBucketEmptyEvent e) {
         if (duel(e.getPlayer()) != null) e.setCancelled(true);
     }
 
     @EventHandler(ignoreCancelled = true)
-    public void onPlace(BlockPlaceEvent e) {
+    public void onBucketFill(PlayerBucketFillEvent e) {
         if (duel(e.getPlayer()) != null) e.setCancelled(true);
+    }
+
+    // Bảo vệ đấu trường khỏi nổ, lửa, piston
+    private boolean inArena(World w) {
+        return w != null && w == plugin.arenaWorld();
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onExplode(EntityExplodeEvent e) {
+        if (inArena(e.getLocation().getWorld())) e.blockList().clear();
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBlockExplode(BlockExplodeEvent e) {
+        if (inArena(e.getBlock().getWorld())) e.blockList().clear();
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onIgnite(BlockIgniteEvent e) {
+        if (inArena(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPistonExtend(BlockPistonExtendEvent e) {
+        if (inArena(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPistonRetract(BlockPistonRetractEvent e) {
+        if (inArena(e.getBlock().getWorld())) e.setCancelled(true);
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -148,20 +221,20 @@ final class DuelListener implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onCommand(PlayerCommandPreprocessEvent e) {
         Player p = e.getPlayer();
-        if (duel(p) == null || p.hasPermission("dautruong.admin")) return;
+        if ((duel(p) == null && !plugin.isSpectating(p)) || p.hasPermission("dautruong.admin")) return;
         String label = e.getMessage().substring(1).split(" ", 2)[0].toLowerCase(Locale.ROOT);
         int colon = label.indexOf(':');
         if (colon >= 0) label = label.substring(colon + 1);
         if (label.equals("dautruong")) return;
         e.setCancelled(true);
-        plugin.send(p, "<red>Bạn không thể dùng lệnh khác trong trận. Dùng <yellow>/dautruong leave</yellow> để rời trận.");
+        plugin.send(p, "<red>Bạn không thể dùng lệnh khác lúc này. Dùng <yellow>/dautruong leave</yellow> để rời trận hoặc thoát chế độ xem.");
     }
 
     // Không cho dịch chuyển ra khỏi đấu trường trong lúc đang đấu
     @EventHandler(ignoreCancelled = true)
     public void onTeleport(PlayerTeleportEvent e) {
         Player p = e.getPlayer();
-        if (duel(p) == null || plugin.isInternalTeleport()) return;
+        if ((duel(p) == null && !plugin.isSpectating(p)) || plugin.isInternalTeleport()) return;
         World arena = plugin.arenaWorld();
         Location to = e.getTo();
         if (arena == null || to.getWorld() != arena) e.setCancelled(true);
