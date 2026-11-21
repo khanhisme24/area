@@ -1,5 +1,6 @@
 package vn.dautruong;
 
+import org.bukkit.block.BlockState;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.HashMap;
@@ -13,6 +14,8 @@ final class Duel {
     final UUID a;
     final UUID b;
     final Map<UUID, PlayerSnapshot> snapshots = new HashMap<>();
+    /** Block người chơi đã đặt trong trận: key = blockKey, value = trạng thái gốc trước khi đặt. */
+    final Map<Long, BlockState> placed = new HashMap<>();
     State state = State.COUNTDOWN;
     BukkitTask task;
 
